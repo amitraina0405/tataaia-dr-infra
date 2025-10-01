@@ -1,0 +1,53 @@
+environment:
+  name: null
+  region: null
+  owner: null
+  compliance: null
+network:
+  cidr: null
+  subnets:
+    - name: null
+      cidr: null
+    - name: null
+      cidr: null
+  firewall_rules:
+    - name: null
+      src: null
+      dest: null
+      ports: null
+      protocol: null
+servers:
+  application:
+    - name: null
+      os: null
+      cpu: null
+      memory: null
+      ip: null
+  database:
+    - name: null
+      engine: null
+      cpu: null
+      memory: null
+      storage: null
+      ip: null
+storage:
+  replication:
+    type: null
+    dr_target: null
+    schedule: null
+monitoring:
+  stack:
+    - null
+  alerting:
+    channels:
+      - email: null
+      - slack: null
+  thresholds:
+    rto: null
+    rpo: null
+security:
+  access_control:
+    - role: null
+      users: null
+      privileges: null
+
