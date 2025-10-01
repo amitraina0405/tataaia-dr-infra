@@ -1,0 +1,73 @@
+onprem:
+  datacenter:
+    name: TATA-AIA-PDC
+    location: Mumbai
+    network:
+      vlan_id: 101
+      cidr: 10.10.0.0/16
+      subnets:
+        - name: app_subnet
+          cidr: 10.10.1.0/24
+        - name: db_subnet
+          cidr: 10.10.2.0/24
+        - name: monitoring_subnet
+          cidr: 10.10.3.0/24
+      firewall_rules:
+        - name: allow_app_to_db
+          src_subnet: 10.10.1.0/24
+          dest_subnet: 10.10.2.0/24
+          ports:
+            - 3306
+            - 5432
+          protocol: tcp
+        - name: allow_monitoring
+          src_subnet: 10.10.3.0/24
+          dest_subnet: 10.10.1.0/24
+          ports:
+            - 9100
+            - 9090
+          protocol: tcp
+  servers:
+    application:
+      - name: crm-app01
+        os: rhel8
+        cpu: 8
+        memory: 32GB
+        ip: 10.10.1.10
+      - name: policy-app01
+        os: rhel8
+        cpu: 8
+        memory: 32GB
+        ip: 10.10.1.11
+    database:
+      - name: crm-db01
+        engine: oracle19c
+        cpu: 16
+        memory: 64GB
+        storage: 2TB
+        ip: 10.10.2.10
+      - name: policy-db01
+        engine: mysql8
+        cpu: 12
+        memory: 48GB
+        storage: 1TB
+        ip: 10.10.2.11
+  storage:
+    replication:
+      type: async
+      dr_target: aws_s3_bucket
+      encryption: AES-256
+      schedule: hourly
+  monitoring:
+    stack:
+      - prometheus
+      - grafana
+      - loki
+    alerting:
+      channels:
+        - email: sre_team@tataaia.com
+        - slack: sre-dr-alerts
+    metrics:
+      - rto_threshold: 30m
+      - rpo_threshold: 15m
+
