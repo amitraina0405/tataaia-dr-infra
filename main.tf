@@ -1,120 +1,173 @@
+########################################################
+# terraform/hybrid-dr/main.tf
+# Hybrid DR - AWS resources (VPC, Subnets, EC2, RDS, S3, IAM, CloudWatch)
+# Designed for Tata AIA Hybrid-Cloud DR site
+########################################################
+terraform {
+ required_version = ">= 1.0"
+ required_providers {
+   aws = {
+     source  = "hashicorp/aws"
+     version = ">= 4.0"
+   }
+ }
+}
+provider "aws" {
+ region = var.aws_region
+ # credentials are provided via environment / profile / shared credentials file
+ # profile = var.aws_profile (optional)
+}
+####################
+# Locals / Tags
+####################
 locals {
- name = "${var.project}-${var.environment}"
+ common_tags = merge({
+   Project = "Hybrid-DR"
+   Owner   = "TataAIA"
+   Env     = "dr"
+ }, var.extra_tags)
 }
-# ========== VPCs & Subnets ==========
-resource "aws_vpc" "primary" {
- provider             = aws.primary
- cidr_block           = var.primary_vpc_cidr
- enable_dns_support   = true
+####################
+# VPC + Networking
+####################
+resource "aws_vpc" "dr_vpc" {
+ cidr_block           = var.vpc_cidr
  enable_dns_hostnames = true
- tags = merge(var.tags, { Name = "${local.name}-primary-vpc" })
-}
-resource "aws_vpc" "dr" {
- provider             = aws.dr
- cidr_block           = var.dr_vpc_cidr
  enable_dns_support   = true
- enable_dns_hostnames = true
- tags = merge(var.tags, { Name = "${local.name}-dr-vpc" })
+ tags                 = merge(local.common_tags, { Name = var.dr_vpc_name })
 }
-# create 2 AZ subnets each for app & db (primary)
-resource "aws_subnet" "primary_app_a" {
- provider = aws.primary
- vpc_id = aws_vpc.primary.id
- cidr_block = cidrsubnet(var.primary_vpc_cidr, 4, 0)
- tags = merge(var.tags, { Name = "${local.name}-primary-app-a" })
+resource "aws_internet_gateway" "dr_igw" {
+ vpc_id = aws_vpc.dr_vpc.id
+ tags   = merge(local.common_tags, { Name = "${var.dr_vpc_name}-igw" })
 }
-resource "aws_subnet" "primary_app_b" {
- provider = aws.primary
- vpc_id = aws_vpc.primary.id
- cidr_block = cidrsubnet(var.primary_vpc_cidr, 4, 1)
- tags = merge(var.tags, { Name = "${local.name}-primary-app-b" })
+resource "aws_subnet" "dr_public" {
+ for_each = toset(var.azs)
+ vpc_id            = aws_vpc.dr_vpc.id
+ cidr_block        = cidrsubnet(var.vpc_cidr, 8, index(var.azs, each.key))
+ availability_zone = each.key
+ map_public_ip_on_launch = true
+ tags = merge(local.common_tags, { Name = "${var.dr_vpc_name}-public-${each.key}" })
 }
-resource "aws_subnet" "primary_db_a" {
- provider = aws.primary
- vpc_id = aws_vpc.primary.id
- cidr_block = cidrsubnet(var.primary_vpc_cidr, 4, 2)
- tags = merge(var.tags, { Name = "${local.name}-primary-db-a" })
+resource "aws_subnet" "dr_private" {
+ for_each = toset(var.azs)
+ vpc_id            = aws_vpc.dr_vpc.id
+ cidr_block        = cidrsubnet(var.vpc_cidr, 8, length(var.azs) + index(var.azs, each.key))
+ availability_zone = each.key
+ map_public_ip_on_launch = false
+ tags = merge(local.common_tags, { Name = "${var.dr_vpc_name}-private-${each.key}" })
 }
-resource "aws_subnet" "primary_db_b" {
- provider = aws.primary
- vpc_id = aws_vpc.primary.id
- cidr_block = cidrsubnet(var.primary_vpc_cidr, 4, 3)
- tags = merge(var.tags, { Name = "${local.name}-primary-db-b" })
+resource "aws_route_table" "public_rt" {
+ vpc_id = aws_vpc.dr_vpc.id
+ tags   = merge(local.common_tags, { Name = "${var.dr_vpc_name}-public-rt" })
 }
-# DR subnets
-resource "aws_subnet" "dr_app_a" {
- provider = aws.dr
- vpc_id = aws_vpc.dr.id
- cidr_block = cidrsubnet(var.dr_vpc_cidr, 4, 0)
- tags = merge(var.tags, { Name = "${local.name}-dr-app-a" })
+resource "aws_route" "public_internet_access" {
+ route_table_id         = aws_route_table.public_rt.id
+ destination_cidr_block = "0.0.0.0/0"
+ gateway_id             = aws_internet_gateway.dr_igw.id
 }
-resource "aws_subnet" "dr_app_b" {
- provider = aws.dr
- vpc_id = aws_vpc.dr.id
- cidr_block = cidrsubnet(var.dr_vpc_cidr, 4, 1)
- tags = merge(var.tags, { Name = "${local.name}-dr-app-b" })
+resource "aws_route_table_association" "public_assoc" {
+ for_each       = aws_subnet.dr_public
+ subnet_id      = each.value.id
+ route_table_id = aws_route_table.public_rt.id
 }
-resource "aws_subnet" "dr_db_a" {
- provider = aws.dr
- vpc_id = aws_vpc.dr.id
- cidr_block = cidrsubnet(var.dr_vpc_cidr, 4, 2)
- tags = merge(var.tags, { Name = "${local.name}-dr-db-a" })
+####################
+# Security Group
+####################
+resource "aws_security_group" "dr_sg" {
+ name   = "${var.dr_vpc_name}-sg"
+ vpc_id = aws_vpc.dr_vpc.id
+ description = "DR SG: allow SSH from management & allow app/DB ports from TN/OnPrem or specific CIDRs"
+ dynamic "ingress" {
+   for_each = var.sg_ingress_cidrs
+   content {
+     description = "management access"
+     from_port   = lookup(ingress.value, "from_port", 22)
+     to_port     = lookup(ingress.value, "to_port", 22)
+     protocol    = lookup(ingress.value, "protocol", "tcp")
+     cidr_blocks = [lookup(ingress.value, "cidr", ingress.value)]
+   }
+ }
+ # allow replication DB traffic inside VPC
+ ingress {
+   from_port   = 3306
+   to_port     = 3306
+   protocol    = "tcp"
+   cidr_blocks = [aws_vpc.dr_vpc.cidr_block]
+   description = "internal DB replication"
+ }
+ egress {
+   from_port   = 0
+   to_port     = 0
+   protocol    = "-1"
+   cidr_blocks = ["0.0.0.0/0"]
+ }
+ tags = merge(local.common_tags, { Name = "${var.dr_vpc_name}-sg" })
 }
-resource "aws_subnet" "dr_db_b" {
- provider = aws.dr
- vpc_id = aws_vpc.dr.id
- cidr_block = cidrsubnet(var.dr_vpc_cidr, 4, 3)
- tags = merge(var.tags, { Name = "${local.name}-dr-db-b" })
+####################
+# IAM Role for EC2 (S3, CloudWatch Logs)
+####################
+resource "aws_iam_role" "ec2_role" {
+ name = "${var.dr_vpc_name}-ec2-role"
+ assume_role_policy = data.aws_iam_policy_document.ec2_assume_role.json
+ tags = local.common_tags
 }
-# Internal NLBs (placeholders for endpoints)
-resource "aws_lb" "primary_nlb" {
- provider = aws.primary
- name = "${local.name}-primary-nlb"
- internal = true
- load_balancer_type = "network"
- subnets = [aws_subnet.primary_app_a.id, aws_subnet.primary_app_b.id]
- tags = var.tags
+data "aws_iam_policy_document" "ec2_assume_role" {
+ statement {
+   actions = ["sts:AssumeRole"]
+   principals {
+     type        = "Service"
+     identifiers = ["ec2.amazonaws.com"]
+   }
+ }
 }
-resource "aws_lb" "dr_nlb" {
- provider = aws.dr
- name = "${local.name}-dr-nlb"
- internal = true
- load_balancer_type = "network"
- subnets = [aws_subnet.dr_app_a.id, aws_subnet.dr_app_b.id]
- tags = var.tags
+resource "aws_iam_policy" "ec2_s3_cloudwatch_policy" {
+ name        = "${var.dr_vpc_name}-ec2-s3-cw-policy"
+ description = "Allow EC2 to put logs to CloudWatch and access S3 DR backups"
+ policy = jsonencode({
+   Version = "2012-10-17",
+   Statement = [
+     {
+       Action = [
+         "logs:CreateLogGroup",
+         "logs:CreateLogStream",
+         "logs:PutLogEvents",
+         "logs:DescribeLogStreams"
+       ],
+       Effect   = "Allow",
+       Resource = "*"
+     },
+     {
+       Action = [
+         "s3:GetObject",
+         "s3:PutObject",
+         "s3:ListBucket"
+       ],
+       Effect   = "Allow",
+       Resource = [
+         aws_s3_bucket.dr_backups.arn,
+         "${aws_s3_bucket.dr_backups.arn}/*"
+       ]
+     }
+   ]
+ })
 }
-# ========== Site-to-Site VPN (basic) ==========
-resource "aws_customer_gateway" "onprem" {
- provider = aws.primary
- bgp_asn = 65000
- ip_address = var.onprem_public_ip
- type = "ipsec.1"
- tags = merge(var.tags, { Name = "${local.name}-onprem-cgw" })
+resource "aws_iam_role_policy_attachment" "ec2_attach" {
+ role       = aws_iam_role.ec2_role.name
+ policy_arn = aws_iam_policy.ec2_s3_cloudwatch_policy.arn
 }
-resource "aws_vpn_gateway" "primary" {
- provider = aws.primary
- vpc_id = aws_vpc.primary.id
- tags = merge(var.tags, { Name = "${local.name}-vgw" })
+resource "aws_iam_instance_profile" "ec2_instance_profile" {
+ name = "${var.dr_vpc_name}-instance-profile"
+ role = aws_iam_role.ec2_role.name
 }
-resource "aws_vpn_connection" "primary" {
- provider = aws.primary
- vpn_gateway_id = aws_vpn_gateway.primary.id
- customer_gateway_id = aws_customer_gateway.onprem.id
- type = "ipsec.1"
- static_routes_only = true
- tags = merge(var.tags, { Name = "${local.name}-vpn" })
-}
-resource "aws_vpn_connection_route" "primary_route" {
- provider = aws.primary
- vpn_connection_id = aws_vpn_connection.primary.id
- destination_cidr_block = var.onprem_cidr
-}
-# ========== S3 cross-region replication ==========
-resource "aws_s3_bucket" "primary" {
- provider = aws.primary
- bucket = var.s3_primary_bucket
+####################
+# S3 Bucket for Backups
+####################
+resource "aws_s3_bucket" "dr_backups" {
+ bucket = var.s3_backup_bucket_name
  acl    = "private"
- versioning { enabled = true }
+ versioning {
+   enabled = true
+ }
  server_side_encryption_configuration {
    rule {
      apply_server_side_encryption_by_default {
@@ -122,211 +175,147 @@ resource "aws_s3_bucket" "primary" {
      }
    }
  }
- tags = var.tags
+ tags = merge(local.common_tags, { Name = "${var.s3_backup_bucket_name}" })
 }
-resource "aws_s3_bucket" "dr" {
- provider = aws.dr
- bucket = var.s3_dr_bucket
- acl    = "private"
- versioning { enabled = true }
- server_side_encryption_configuration {
-   rule {
-     apply_server_side_encryption_by_default {
-       sse_algorithm = "AES256"
-     }
-   }
- }
- tags = var.tags
+resource "aws_s3_bucket_public_access_block" "dr_backups_block" {
+ bucket = aws_s3_bucket.dr_backups.id
+ block_public_acls       = true
+ block_public_policy     = true
+ ignore_public_acls      = true
+ restrict_public_buckets = true
 }
-data "aws_iam_policy_document" "s3_assume" {
- statement {
-   actions = ["sts:AssumeRole"]
-   principals { type = "Service", identifiers = ["s3.amazonaws.com"] }
- }
+####################
+# EBS Volume for DR data (example)
+####################
+resource "aws_ebs_volume" "dr_data_volume" {
+ availability_zone = element(var.azs, 0)
+ size              = var.ebs_size_gb
+ type              = var.ebs_type
+ encrypted         = true
+ tags              = merge(local.common_tags, { Name = "${var.dr_vpc_name}-data-volume" })
 }
-resource "aws_iam_role" "s3_replication_role" {
- provider = aws.primary
- name = "${local.name}-s3-repl-role"
- assume_role_policy = data.aws_iam_policy_document.s3_assume.json
- tags = var.tags
-}
-data "aws_iam_policy_document" "s3_replication_policy" {
- statement {
-   actions = [
-     "s3:GetReplicationConfiguration",
-     "s3:ListBucket"
-   ]
-   resources = ["arn:aws:s3:::${var.s3_primary_bucket}"]
- }
- statement {
-   actions = [
-     "s3:GetObjectVersion",
-     "s3:GetObjectVersionAcl",
-     "s3:GetObjectVersionTagging"
-   ]
-   resources = ["arn:aws:s3:::${var.s3_primary_bucket}/*"]
- }
- statement {
-   actions = [
-     "s3:ReplicateObject",
-     "s3:ReplicateDelete",
-     "s3:ReplicateTags"
-   ]
-   resources = ["arn:aws:s3:::${var.s3_dr_bucket}/*"]
+####################
+# EC2 Instances (DR compute)
+####################
+data "aws_ami" "amazon_linux_2" {
+ most_recent = true
+ owners      = ["amazon"]
+ filter {
+   name   = "name"
+   values = ["amzn2-ami-hvm-*-x86_64-gp2"]
  }
 }
-resource "aws_iam_role_policy" "s3_replication_policy_attach" {
- provider = aws.primary
- role = aws_iam_role.s3_replication_role.id
- policy = data.aws_iam_policy_document.s3_replication_policy.json
-}
-resource "aws_s3_bucket_replication_configuration" "replication" {
- provider = aws.primary
- bucket = aws_s3_bucket.primary.id
- role   = aws_iam_role.s3_replication_role.arn
- rule {
-   id = "replicate-all"
-   status = "Enabled"
-   destination {
-     bucket = aws_s3_bucket.dr.arn
-     storage_class = "STANDARD"
-   }
+resource "aws_instance" "dr_ec2" {
+ count         = var.dr_ec2_count
+ ami           = data.aws_ami.amazon_linux_2.id
+ instance_type = var.instance_type
+ subnet_id     = element(values(aws_subnet.dr_public)[*].id, count.index % length(var.azs))
+ vpc_security_group_ids = [aws_security_group.dr_sg.id]
+ key_name      = var.ssh_key_name
+ iam_instance_profile = aws_iam_instance_profile.ec2_instance_profile.name
+ root_block_device {
+   volume_size = var.root_volume_size_gb
+   volume_type = "gp3"
+   delete_on_termination = true
  }
+ tags = merge(local.common_tags, { Name = "${var.dr_vpc_name}-ec2-${count.index + 1}" })
+ user_data = templatefile("${path.module}/userdata/dr_instance_userdata.sh.tpl", {
+   s3_bucket = aws_s3_bucket.dr_backups.bucket,
+   region    = var.aws_region
+ })
 }
-# ========== RDS primary + cross-region read replica ==========
-resource "aws_db_subnet_group" "primary" {
- provider = aws.primary
- name = "${local.name}-db-subnets"
- subnet_ids = [aws_subnet.primary_db_a.id, aws_subnet.primary_db_b.id]
- tags = var.tags
+# Attach EBS to the first DR instance (example)
+resource "aws_volume_attachment" "attach_data_vol" {
+ device_name = var.dr_data_device_name
+ volume_id   = aws_ebs_volume.dr_data_volume.id
+ instance_id = element(aws_instance.dr_ec2.*.id, 0)
+ force_detach = true
 }
-resource "aws_db_instance" "primary" {
- provider = aws.primary
- identifier = "${local.name}-primary-db"
- engine = "postgres"
- instance_class = var.db_instance_class
- name = var.db_name
- username = var.db_username
- password = var.db_password
- allocated_storage = var.db_allocated_storage
- multi_az = true
- storage_encrypted = true
- backup_retention_period = 7
- db_subnet_group_name = aws_db_subnet_group.primary.name
- skip_final_snapshot = true
- tags = var.tags
+####################
+# RDS (MySQL) - Optionally a read replica if `replica_source_identifier` provided
+####################
+resource "aws_db_subnet_group" "dr_db_subnet_group" {
+ name       = "${var.dr_vpc_name}-db-subnet-group"
+ subnet_ids = values(aws_subnet.dr_private)[*].id
+ tags       = local.common_tags
 }
-# Create an RDS instance in DR region as a read-replica (replicate_source_db uses arn)
-resource "aws_db_subnet_group" "dr" {
- provider = aws.dr
- name = "${local.name}-db-subnets-dr"
- subnet_ids = [aws_subnet.dr_db_a.id, aws_subnet.dr_db_b.id]
- tags = var.tags
+resource "aws_db_instance" "dr_rds" {
+ count                     = var.create_rds ? 1 : 0
+ identifier                = "${var.dr_vpc_name}-rds"
+ engine                    = var.rds_engine
+ engine_version            = var.rds_engine_version
+ instance_class            = var.rds_instance_class
+ allocated_storage         = var.rds_allocated_storage
+ username                  = var.rds_master_username
+ password                  = var.rds_master_password
+ db_subnet_group_name      = aws_db_subnet_group.dr_db_subnet_group.name
+ vpc_security_group_ids    = [aws_security_group.dr_sg.id]
+ publicly_accessible       = false
+ skip_final_snapshot       = true
+ storage_encrypted         = true
+ backup_retention_period   = var.rds_backup_retention_days
+ tags                      = local.common_tags
+ # If replica_source_identifier is defined, create a read-replica by referencing source db ARN
+ replicate_source_db = var.rds_replicate_source_db != "" ? var.rds_replicate_source_db : null
 }
-resource "aws_db_instance" "dr_replica" {
- provider = aws.dr
- identifier = "${local.name}-dr-replica"
- replicate_source_db = aws_db_instance.primary.arn
- instance_class = var.db_instance_class
- publicly_accessible = false
- storage_encrypted = true
- db_subnet_group_name = aws_db_subnet_group.dr.name
- tags = var.tags
+####################
+# CloudWatch Log Group & Simple Alarm
+####################
+resource "aws_cloudwatch_log_group" "dr_log_group" {
+ name              = "/aws/dr/validation"
+ retention_in_days = 14
+ tags              = local.common_tags
 }
-# ========== Route53 failover (primary/secondary) ==========
-data "aws_route53_zone" "hosted" {
- provider = aws.primary
- name = var.hosted_zone_name
-}
-resource "aws_route53_health_check" "primary" {
- provider = aws.primary
- fqdn = aws_lb.primary_nlb.dns_name
- type = "TCP"
- port = 443
- tags = var.tags
-}
-resource "aws_route53_health_check" "dr" {
- provider = aws.primary
- fqdn = aws_lb.dr_nlb.dns_name
- type = "TCP"
- port = 443
- tags = var.tags
-}
-resource "aws_route53_record" "app_primary" {
- provider = aws.primary
- zone_id = data.aws_route53_zone.hosted.zone_id
- name    = var.record_fqdn
- type    = "CNAME"
- ttl     = 30
- set_identifier = "primary"
- failover_routing_policy { type = "PRIMARY" }
- records = [aws_lb.primary_nlb.dns_name]
- health_check_id = aws_route53_health_check.primary.id
-}
-resource "aws_route53_record" "app_dr" {
- provider = aws.primary
- zone_id = data.aws_route53_zone.hosted.zone_id
- name    = var.record_fqdn
- type    = "CNAME"
- ttl     = 30
- set_identifier = "secondary"
- failover_routing_policy { type = "SECONDARY" }
- records = [aws_lb.dr_nlb.dns_name]
- health_check_id = aws_route53_health_check.dr.id
-}
-# ========== AWS Backup ==========
-resource "aws_backup_vault" "vault" {
- provider = aws.primary
- name = "${local.name}-backup-vault"
- tags = var.tags
-}
-resource "aws_backup_plan" "daily" {
- provider = aws.primary
- name = "${local.name}-daily-7d"
- rule {
-   rule_name = "daily"
-   target_vault_name = aws_backup_vault.vault.name
-   schedule = "cron(0 18 * * ? *)"  # daily (UTC) - adjust for local window
-   lifecycle { delete_after = 7 }
- }
-}
-resource "aws_iam_role" "backup_role" {
- provider = aws.primary
- name = "${local.name}-backup-role"
- assume_role_policy = data.aws_iam_policy_document.backup_assume.json
- tags = var.tags
-}
-data "aws_iam_policy_document" "backup_assume" {
- statement {
-   principals { type = "Service", identifiers = ["backup.amazonaws.com"] }
-   actions = ["sts:AssumeRole"]
- }
-}
-resource "aws_backup_selection" "tagged" {
- provider = aws.primary
- name = "tagged-resources"
- plan_id = aws_backup_plan.daily.id
- iam_role_arn = aws_iam_role.backup_role.arn
- selection_tag {
-   type = "STRINGEQUALS"
-   key = "backup"
-   value = "true"
- }
-}
-# ========== Monitoring example (CloudWatch alarm on RDS free storage) ==========
-resource "aws_cloudwatch_metric_alarm" "rds_free_storage_low" {
- provider = aws.primary
- alarm_name = "${local.name}-rds-free-storage-low"
- comparison_operator = "LessThanThreshold"
+resource "aws_cloudwatch_metric_alarm" "dr_instance_cpu_high" {
+ alarm_name          = "${var.dr_vpc_name}-ec2-cpu-high"
+ comparison_operator = "GreaterThanThreshold"
  evaluation_periods  = 2
- metric_name = "FreeStorageSpace"
- namespace = "AWS/RDS"
- period = 300
- statistic = "Average"
- threshold = 10737418240 # 10 GiB
- alarm_description = "RDS free storage below 10GiB"
+ metric_name         = "CPUUtilization"
+ namespace           = "AWS/EC2"
+ period              = 300
+ statistic           = "Average"
+ threshold           = var.alarm_cpu_threshold
+ alarm_description   = "Alarm when DR EC2 CPU is high"
  dimensions = {
-   DBInstanceIdentifier = aws_db_instance.primary.id
+   AutoScalingGroupName = "" # if ASG used override; otherwise dimensions not required
  }
- tags = var.tags
+ # Simple action: send to SNS topic if provided
+ alarm_actions = var.sns_topic_arn != "" ? [var.sns_topic_arn] : []
+ ok_actions    = var.sns_topic_arn != "" ? [var.sns_topic_arn] : []
+ tags = local.common_tags
+}
+####################
+# Outputs
+####################
+output "dr_vpc_id" {
+ value = aws_vpc.dr_vpc.id
+ description = "DR VPC id"
+}
+output "dr_public_subnet_ids" {
+ value = values(aws_subnet.dr_public)[*].id
+ description = "List of public subnet ids"
+}
+output "dr_private_subnet_ids" {
+ value = values(aws_subnet.dr_private)[*].id
+ description = "List of private subnet ids"
+}
+output "dr_ec2_public_ips" {
+ value = aws_instance.dr_ec2[*].public_ip
+ description = "Public IPs of DR EC2 instances (if map_public_ip_on_launch true)"
+}
+output "dr_ec2_ids" {
+ value = aws_instance.dr_ec2[*].id
+ description = "IDs of DR EC2 instances"
+}
+output "dr_ebs_volume_id" {
+ value = aws_ebs_volume.dr_data_volume.id
+ description = "EBS volume id for DR data"
+}
+output "dr_rds_endpoint" {
+ value = length(aws_db_instance.dr_rds) > 0 ? aws_db_instance.dr_rds[0].address : ""
+ description = "RDS endpoint if created"
+}
+output "dr_backups_s3_bucket" {
+ value = aws_s3_bucket.dr_backups.bucket
+ description = "S3 bucket used to store backups for DR"
 }
