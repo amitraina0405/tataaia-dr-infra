@@ -1,0 +1,43 @@
+---
+# roles/env-setup/handlers/main.yml
+# Handlers for Automated DR Setup in Hybrid Cloud (Tata AIA)
+# Triggered from tasks/main.yml using `notify`
+- name: restart networking
+ ansible.builtin.service:
+   name: network
+   state: restarted
+ listen: "network_updated"
+- name: reload firewall
+ ansible.builtin.service:
+   name: firewalld
+   state: reloaded
+ listen: "firewall_updated"
+- name: restart prometheus node exporter
+ ansible.builtin.service:
+   name: node_exporter
+   state: restarted
+ listen: "monitoring_updated"
+- name: restart cloudwatch agent
+ ansible.builtin.service:
+   name: amazon-cloudwatch-agent
+   state: restarted
+ listen: "cloudwatch_updated"
+- name: restart dr replication service
+ ansible.builtin.service:
+   name: dr-replication
+   state: restarted
+ listen: "replication_updated"
+- name: restart terraform daemon
+ ansible.builtin.service:
+   name: terraform-enterprise
+   state: restarted
+ listen: "terraform_updated"
+- name: trigger dr validation
+ ansible.builtin.command: /usr/local/bin/run_dr_validation.sh
+ register: dr_validation_result
+ changed_when: false
+ listen: "dr_validation_trigger"
+- name: show dr validation status
+ ansible.builtin.debug:
+   msg: "DR Validation completed. Output: {{ dr_validation_result.stdout }}"
+ listen: "dr_validation_trigger"

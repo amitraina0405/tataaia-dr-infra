@@ -1,0 +1,39 @@
+- name: Ensure required packages are installed
+  yum:
+    name:
+      - git
+      - unzip
+    state: present
+  become: 'yes'
+- name: Create application directory
+  file:
+    path: /opt/myapp
+    state: directory
+    owner: appuser
+    group: appgroup
+    mode: '0755'
+- name: Pull application code from Git repo
+  git:
+    repo: '{{ app_repo_url }}'
+    dest: /opt/myapp
+    version: '{{ app_version | default(''main'') }}'
+    force: 'yes'
+- name: Deploy application configuration
+  template:
+    src: app_config.j2
+    dest: /opt/myapp/config/app_config.yml
+    owner: appuser
+    group: appgroup
+    mode: '0644'
+- name: Install dependencies (if Python app)
+  pip:
+    requirements: /opt/myapp/requirements.txt
+    virtualenv: /opt/myapp/venv
+    virtualenv_python: python3
+  when: app_type == "python"
+- name: Start application service
+  systemd:
+    name: myapp
+    state: started
+    enabled: 'yes'
+

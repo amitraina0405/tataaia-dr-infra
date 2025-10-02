@@ -1,0 +1,75 @@
+- name: Include variables for DR setup
+  include_vars: '{{ playbook_dir }}/vars/env_setup.yml'
+- name: Configure On-Prem VLAN and Subnet
+  ansible.builtin.command: |
+
+    nmcli connection add type ethernet
+    con-name dr_vlan{{ onprem_vlan_id }}
+    ifname {{ onprem_iface }}
+    ipv4.addresses {{ onprem_subnet }}
+    ipv4.method manual
+  when: 'inventory_hostname in groups[''onprem'']'
+- name: Create VPC in AWS for DR
+  amazon.aws.ec2_vpc_net:
+    name: '{{ dr_vpc_name }}'
+    cidr_block: '{{ dr_vpc_cidr }}'
+    region: '{{ aws_region }}'
+    tags:
+      Environment: DR
+      Owner: TataAIA
+  register: dr_vpc
+- name: Provision EBS volume for DR
+  amazon.aws.ec2_vol:
+    region: '{{ aws_region }}'
+    availability_zone: '{{ aws_az }}'
+    size: 100
+    volume_type: gp3
+    tags:
+      Name: dr-storage
+      Purpose: DR-Replication
+  register: dr_storage
+- name: Mount storage on On-Prem DR servers
+  ansible.builtin.mount:
+    path: /mnt/dr_data
+    src: '{{ dr_storage_device }}'
+    fstype: ext4
+    state: mounted
+  when: 'inventory_hostname in groups[''onprem'']'
+- name: Initialize Terraform for Hybrid DR
+  community.general.terraform:
+    project_path: '{{ playbook_dir }}/terraform/hybrid-dr'
+    state: present
+    force_init: true
+- name: Apply Terraform infra
+  community.general.terraform:
+    project_path: '{{ playbook_dir }}/terraform/hybrid-dr'
+    state: present
+    variables:
+      aws_region: '{{ aws_region }}'
+      vpc_id: '{{ dr_vpc.vpc.id }}'
+      dr_storage_id: '{{ dr_storage.volume_id }}'
+- name: Validate Terraform plan with OPA policies
+  ansible.builtin.command: |
+
+    conftest test {{ playbook_dir }}/terraform/hybrid-dr/plan.json
+  register: opa_validation
+  failed_when: opa_validation.rc != 0
+- name: Fail if Policy violations exist
+  ansible.builtin.fail:
+    msg: 'Policy as Code check failed: {{ opa_validation.stdout }}'
+  when: opa_validation.rc != 0
+- name: Register DR nodes in Prometheus
+  ansible.builtin.lineinfile:
+    path: /etc/prometheus/targets/dr_nodes.yml
+    line: '- {{ inventory_hostname }}:9100'
+  when: 'inventory_hostname in groups[''dr_nodes'']'
+- name: Trigger DR test validation script
+  ansible.builtin.shell: |
+
+    /usr/local/bin/run_dr_validation.sh
+  register: dr_test
+  changed_when: false
+- name: Show DR readiness result
+  ansible.builtin.debug:
+    msg: 'DR Validation for {{ inventory_hostname }}: {{ dr_test.stdout }}'
+
