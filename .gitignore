@@ -205,3 +205,75 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+# -------------------------------
+# Ansible
+# -------------------------------
+*.retry
+*.log
+*.out
+*.bak
+*.swp
+*.swo
+*.tmp
+*.cache
+*.facts
+ansible.cfg.local
+host_vars/*/vault.yml
+group_vars/*/vault.yml
+secrets.yml
+vault_pass.txt
+# -------------------------------
+# Terraform
+# -------------------------------
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraform.lock.hcl
+# -------------------------------
+# Policy as Code (OPA/Conftest)
+# -------------------------------
+*.rego.test
+*.plan.json
+opa_results.json
+# -------------------------------
+# Python / Scripts
+# -------------------------------
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.eggs/
+.venv/
+env/
+venv/
+ENV/
+# -------------------------------
+# System / Editor Files
+# -------------------------------
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.iml
+*.class
+# -------------------------------
+# Logs & Backups
+# -------------------------------
+logs/
+*.log
+*.gz
+*.zip
+*.tar
+*.tgz
+*.bak
+# -------------------------------
+# DR Validation Output
+# -------------------------------
+dr_validation_report.txt
+dr_test_results.json
