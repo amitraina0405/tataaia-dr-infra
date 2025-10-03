@@ -88,31 +88,40 @@ cd dr-automation
 
 2. Install Dependencies
 ansible-galaxy install -r requirements.yml
+
 3. Initialize Terraform
 cd terraform/hybrid-dr
 terraform init
 terraform plan -out=plan.json
+
 4. Apply Ansible Playbook
 ansible-playbook ansible/playbooks/dr_setup.yml -i inventory/hosts.ini
+
 5.  Run Policy Validation
 conftest test terraform/hybrid-dr/plan.json
+
 6. Run DR Validation
 bash scripts/run_dr_validation.sh
+
 Monitoring & Reporting
 • Prometheus Targets: DR nodes automatically added.
 • Grafana Dashboards: Prebuilt DR dashboards for SLA tracking.
 • Validation Reports: Stored under dr_validation_report.txt.
+
 Security & Compliance
 • All sensitive variables are stored in Ansible Vault.
 • OPA policies ensure infra follows IRDAI, RBI, and ISO 22301 compliance.
 • Terraform plan must pass PaC validation before apply.
+
 Future Enhancements
 • Multi-region DR failover automation
 • Chaos Engineering for resilience testing
 • Integration with ServiceNow CMDB for asset tracking
+
 Contributors
 • SRE Team – Tata AIA Life Insurance
 • AVP SRE (Infrastructure Automation & DR Strategy)
+
 License
 This project is licensed under the MIT License.
 --- 
